@@ -1,0 +1,187 @@
+#! /usr/bin/env python3
+
+
+"""
+Pokemon Database
+
+Written by: <WEIHOU ZENG>
+Written on: <12/04/2023>
+
+Possible Evolutions
+
+Given the name of a pokemon,
+display a list of all the pokemon that could evolve into the given pokemon,
+and a list of all the pokemon that the given pokemon could evolve into.
+"""
+
+import traceback
+import sys
+import psycopg2
+import helpers
+
+
+### Constants
+USAGE = f"Usage: {sys.argv[0]} <Pokemon Name>"
+
+
+### Globals
+db = None
+Pokemon_Name = None
+
+
+### Command-line args
+if len(sys.argv) != 2:
+    print(USAGE, file=sys.stderr)
+    sys.exit(1)
+Pokemon_Name = helpers.clean(sys.argv[1])
+
+
+
+def check_pokemon_exists(cur, name):
+    check = """
+    SELECT EXISTS (
+        SELECT 1
+        FROM Pokemon
+        WHERE name = %s
+    )
+    """
+    cur.execute(check, (name,))
+    check_r = cur.fetchone()
+
+    if not check_r[0]:
+        print(f"'{name}' isn't a Pokemon that exists.", file=sys.stderr)
+        sys.exit(1)
+
+
+
+def fetch_pre_post_evolution(cur, name):
+    pre_evolution_query = """
+    SELECT pe.id, po.id as poke_id, po.name, re.assertion, er.inverted
+    FROM Pokemon AS po
+    INNER JOIN (
+        SELECT e.id, e.pre_evolution
+        FROM Evolutions AS e
+        INNER JOIN (
+            SELECT id FROM Pokemon WHERE name = %s
+        ) AS p ON p.id = e.post_evolution
+    ) AS pe ON pe.pre_evolution = po.id
+    JOIN (
+        SELECT evolution, requirement, inverted
+        FROM Evolution_Requirements
+    ) AS er ON er.evolution = pe.id
+    JOIN (
+        SELECT id, assertion
+        FROM Requirements
+    ) AS re ON er.requirement = re.id
+    ORDER BY po.id, pe.id, er.inverted, re.id;
+    """
+    cur.execute(pre_evolution_query, (name,))
+    pre = cur.fetchall()
+
+    post_evolution_query = """
+    SELECT pe.id, po.id as poke_id, po.name, re.assertion, er.inverted
+    FROM Pokemon AS po
+    INNER JOIN (
+        SELECT e.id, e.post_evolution
+        FROM Evolutions AS e
+        INNER JOIN (
+            SELECT id FROM Pokemon WHERE name = %s
+        ) AS p ON p.id = e.pre_evolution
+    ) AS pe ON pe.post_evolution = po.id
+    JOIN (
+        SELECT evolution, requirement, inverted
+        FROM Evolution_Requirements
+    ) AS er ON er.evolution = pe.id
+    JOIN (
+        SELECT id, assertion
+        FROM Requirements
+    ) AS re ON er.requirement = re.id;
+    """
+    cur.execute(post_evolution_query, (name,))
+    post = cur.fetchall()
+
+    return pre, post
+
+
+
+def format_evolution(requirements):
+    ev_req_map = {}
+    for req in requirements:
+        ev_req_map.setdefault(req[0], []).append(req)
+
+    output = ""
+
+    for evo, reqs in ev_req_map.items():
+        req_strings = []
+        for req in reqs:
+            req_string = f"{req[3]}"
+            if req[4]:
+                req_string = f"NOT {req_string}"
+            req_strings.append(f"\t\t\t\t{req_string}")
+        output += "\t\t\t\t" + "\n\t\t\tAND\n".join(req_strings) + "\n\t\tOR\n"
+    output = output[:-5]
+
+    return output
+
+
+
+def format_output(pre, post):
+    output = ""
+
+    if not pre:
+        output += f"'{Pokemon_Name}' doesn't have any pre-evolutions.\n\n"
+    else:
+        pre_ev_map = {ev[1]: [] for ev in pre}
+        for ev in pre:
+            pre_ev_map[ev[1]].append(ev)
+
+        output += f"'{Pokemon_Name}' can evolve from:\n"
+        for e, ev_list in pre_ev_map.items():
+            output += f"\t'{ev_list[0][2]}' when the following requirements are satisfied:\n"
+            output += format_evolution(ev_list)
+
+    if not post:
+        output += f"'{Pokemon_Name}' doesn't have any post-evolutions.\n"
+    else:
+        post_ev_map = {ev[1]: [] for ev in post}
+        for ev in post:
+            post_ev_map[ev[1]].append(ev)
+
+        output += f"'{Pokemon_Name}' can evolve into:\n"
+        for e, ev_list in post_ev_map.items():
+            output += f"\t'{ev_list[0][2]}' when the following requirements are satisfied:\n"
+            output += format_evolution(ev_list)
+
+    return output
+
+
+
+def main():
+    try:
+        with db.cursor() as cur:
+            check_pokemon_exists(cur, Pokemon_Name)
+            pre, post = fetch_pre_post_evolution(cur, Pokemon_Name)
+
+            output = format_output(pre, post)
+            print(output)
+
+    except Exception as e:
+        traceback.print_exc()
+        print(f"Error: {str(e)}", file=sys.stderr)
+        return 1
+
+
+
+if __name__ == '__main__':
+    try:
+        db = psycopg2.connect(dbname="ass2")
+        main()
+    except psycopg2.Error as err:
+        print("DB error: ", err)
+    except Exception as err:
+        print("Internal Error: ", err)
+        raise err
+    finally:
+        if db is not None:
+            db.close()
+    sys.exit(0)

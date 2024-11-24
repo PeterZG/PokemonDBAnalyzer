@@ -1,0 +1,123 @@
+#! /usr/bin/env python3
+
+
+"""
+Pokemon Database
+
+Written by: <WEIHOU ZENG>
+Written on: <12/04/2023>
+
+Pokemon Density
+
+Find the density of pokemon in each location within a given region.
+"""
+
+
+import sys
+import psycopg2
+import helpers
+
+
+### Constants
+USAGE = f"Usage: {sys.argv[0]} <Region>"
+
+
+### Globals
+db = None
+Region = None
+
+
+### Command-line args
+if len(sys.argv) != 2:
+    print(USAGE, file=sys.stderr)
+    sys.exit(1)
+Region = helpers.clean(sys.argv[1])
+
+
+def main():
+    # TODO: YOUR CODE HERE
+    # SQL Queries
+    scale_to_density_function = """
+    CREATE OR REPLACE FUNCTION scale_to_density(m Meters, k Kilograms, s Numeric) RETURNS Numeric
+    AS $$
+        SELECT (k / (4.0/3.0 * PI() * POWER(m/2.0, 3.0))) * 0.001 * (s / 100.0);
+    $$ LANGUAGE SQL;
+    """
+
+    sum_together_view = """
+    CREATE OR REPLACE VIEW sum_together(count_density, sum_Density, Location_ID) AS
+    SELECT COUNT(sd.density) AS count_density, SUM(sd.density) AS sum_density, l.id AS Location_ID
+    FROM (
+        SELECT scale_to_density(p.average_height, p.average_weight, e.rarity) AS density, e.occurs_at
+        FROM Pokemon AS p
+        JOIN Encounters AS e ON p.id = e.occurs_with
+    ) AS sd
+    JOIN Locations AS l ON sd.occurs_at = l.id
+    GROUP BY l.id;
+    """
+
+    in_region_view = """
+    CREATE OR REPLACE VIEW in_region(name, id, region) AS
+    SELECT l.name, l.id, g.region
+    FROM Locations AS l
+    JOIN Games AS g ON l.appears_in = g.id
+    GROUP BY l.id, g.region, l.name;
+    """
+
+    with db.cursor() as cur:
+        # Execute SQL queries
+        cur.execute(scale_to_density_function)
+        cur.execute(sum_together_view)
+        cur.execute(in_region_view)
+        valid_region = "SELECT region FROM Games where region = %s;"
+        try:
+            cur.execute(valid_region, (Region,))
+        except psycopg2.errors.InvalidTextRepresentation:
+            print(f"'{Region}' isn't a region in the Pokemon series.", file=sys.stderr)
+            sys.exit(1)
+
+        location = """
+        SELECT l.name, AVG(sd.sum_density) AS average_density
+        FROM in_region AS l
+        LEFT JOIN sum_together AS sd ON l.id = sd.location_id
+        WHERE region = %s
+        GROUP BY l.name
+        ORDER BY average_density DESC, l.name ASC;
+        """
+        cur.execute(location, (Region,))
+        info = cur.fetchall()
+
+
+    output = f"""
+    The average density of Pokemon within each location in the '{Region}' region: \n
+    """
+    empty_locations = []
+    for row in info:
+        if row[1] is None:
+            empty_locations.append(row[0])
+        else:
+            output += f"\t{row[0]}:{row[1]:.4f}\n"
+    if not output.strip():
+        print(f"No wild Pokemon encounters found in the '{Region}' region.", file=sys.stderr)
+        sys.exit(1)
+    if empty_locations:
+        output += f"\nThe following locations in the '{Region}' region have no wild Pokemon encounters: \n"
+        for location in empty_locations:
+            output += f"\t{location}\n"
+    print(output)
+
+
+
+if __name__ == '__main__':
+    try:
+        db = psycopg2.connect(dbname="ass2")
+        main()
+    except psycopg2.Error as err:
+        print("DB error: ", err)
+    except Exception as err:
+        print("Internal Error: ", err)
+        raise err
+    finally:
+        if db is not None:
+            db.close()
+    sys.exit(0)

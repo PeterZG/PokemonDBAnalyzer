@@ -1,0 +1,177 @@
+#! /usr/bin/env python3
+
+
+"""
+Pokemon Database
+
+Written by: <WEIHOU ZENG>
+Written on: <12/04/2023>
+
+Encounter Summary
+
+Print a summary of all the Pokemon that can be encountered at a given location in a given game
+"""
+
+
+import sys
+import psycopg2
+import helpers
+
+
+### Constants
+USAGE = f"Usage: {sys.argv[0]} <Location> <Game>"
+
+
+### Globals
+db = None
+Location = None
+Game = None
+
+
+### Command-line args
+if len(sys.argv) != 3:
+    print(USAGE, file=sys.stderr)
+    sys.exit(1)
+Location = helpers.clean(sys.argv[1])
+Game     = helpers.clean(sys.argv[2])
+
+
+def main():
+    # TODO: YOUR CODE HERE
+    new_pokemon_function = """
+    CREATE OR REPLACE FUNCTION new_pokemon_function_name(type_id NUMERIC)
+    RETURNS TEXT AS $$
+    BEGIN
+      RETURN (SELECT name FROM types WHERE id = type_id);
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+
+    with db.cursor() as cur:
+        # Execute SQL function
+        cur.execute(new_pokemon_function)
+        # check
+        cur.execute("SELECT 1 FROM Games WHERE name = %s LIMIT 1", (Game,))
+        if not cur.fetchone():
+            print(f"'Pokemon {Game}' isn't a game in the Pokemon series.", file=sys.stderr)
+            sys.exit(1)
+
+        cur.execute("SELECT 1 FROM Locations WHERE name = %s LIMIT 1", (Location,))
+        if not cur.fetchone():
+            print(f"'{Location}' isn't a location in the Pokemon series.", file=sys.stderr)
+            sys.exit(1)
+
+        i_q = """
+        SELECT l.id
+        FROM Locations AS l
+        JOIN Games AS g ON l.appears_in = g.id
+        WHERE l.name = %s
+        AND g.Name = %s
+        LIMIT 1
+        """
+        cur.execute(i_q, (Location, Game))
+        c_result = cur.fetchone()
+        if not c_result:
+            print(f"'{Location}' isn't in 'Pokemon {Game}'.", file=sys.stderr)
+            sys.exit(1)
+
+        q_enc = """
+        SELECT
+            p.id,
+            p.name,
+            new_pokemon_function_name(p.first_type),
+            new_pokemon_function_name(p.second_type),
+            e.rarity,
+            e.levels,
+            eg.name,
+            r.assertion,
+            en.inverted,
+            a.name,
+            e.id
+        FROM
+            Encounters as e
+            JOIN Pokemon as p ON e.occurs_with = p.id
+            JOIN Encounter_requirements as en ON en.encounter = e.id
+            JOIN Requirements as r ON r.id = en.requirement
+            LEFT JOIN In_Group as ig ON ig.pokemon = p.id
+            LEFT JOIN Egg_Groups as eg ON eg.id = ig.egg_group
+            LEFT JOIN Knowable_Abilities as ka ON ka.known_by = p.id AND ka.hidden = False
+            LEFT JOIN Abilities as a ON ka.knows = a.id
+        WHERE
+            e.occurs_at = %s
+        ORDER BY
+            e.rarity,
+            p.name,
+            e.levels,
+            en.requirement
+        """
+        cur.execute(q_enc, (c_result[0], ))
+        e_result = cur.fetchall()
+
+        e_map = {}
+        for e in e_result:
+            current = e_map.setdefault(e[10], {
+                'Name': e[1],
+                'Type': [e[2], e[3]],
+                'Rarity': e[4],
+                'Levels': e[5],
+                'Egg Groups': [],
+                'Abilities': [],
+                'Encounter Requirements': []
+            })
+
+            if e[6] is not None and e[6] not in current['Egg Groups']:
+                current['Egg Groups'].append(e[6])
+
+            if (e[7], e[8]) not in current['Encounter Requirements']:
+                current['Encounter Requirements'].append((e[7], e[8]))
+
+            if e[9] is not None and e[9] not in current['Abilities']:
+                current['Abilities'].append(e[9])
+
+        sort_there = sorted([    (        100 - e_map[e]['Rarity'],
+                e_map[e]['Name'],
+                int(e_map[e]['Levels'][1:-1].split(',')[1]),
+                e_map[e]['Encounter Requirements'],
+                e
+            )
+            for e in e_map.keys()
+        ])
+
+        res_output = f"In 'Pokemon {Game}' at '{Location}' the following Pokemon can be Encountered:\n"
+        for order in sort_there:
+            pokemon = order[4]
+            e_map[pokemon]['Levels'] = e_map[pokemon]['Levels'][1:-1].split(',')
+
+            res_output += f"\t{order[1]}:\n"
+            res_output += f"\t\tType: {e_map[pokemon]['Type'][0]}"
+            res_output += f"/{e_map[pokemon]['Type'][1]}\n" if e_map[pokemon]['Type'][1] else "\n"
+            res_output += f"\t\tRarity: {e_map[pokemon]['Rarity']}%\n"
+            res_output += f"\t\tLevels: min {e_map[pokemon]['Levels'][0]}, max {e_map[pokemon]['Levels'][1]}\n"
+            res_output += f"\t\tEgg Groups: {', '.join(sorted(e_map[pokemon]['Egg Groups']))}\n" if len(e_map[pokemon]['Egg Groups']) > 0 else ""
+            res_output += f"\t\tAbilities: {', '.join(sorted(e_map[pokemon]['Abilities']))}\n" if len(e_map[pokemon]['Abilities']) > 0 else ""
+            res_output += "\t\tEncounter Requirements: \n"
+            for req in sorted(e_map[pokemon]['Encounter Requirements']):
+                res_output += f"NOT {req[0]}\n" if req[1] else f"{req[0]}\n"
+            res_output += "\n"
+
+        print(res_output)
+        sys.exit(0)
+
+
+
+
+
+if __name__ == '__main__':
+    try:
+        db = psycopg2.connect(dbname="ass2")
+        main()
+    except psycopg2.Error as err:
+        print("DB error: ", err)
+    except Exception as err:
+        print("Internal Error: ", err)
+        raise err
+    finally:
+        if db is not None:
+            db.close()
+    sys.exit(0)
